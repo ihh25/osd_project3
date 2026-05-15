@@ -72,6 +72,9 @@ usertrap(void)
 
     syscall();
   // project 3: 페이지 폴트 핸들러
+  // AI was used to implement the page fault handler for lazy mmap regions.
+  // It validates the fault address against mmap_area, allocates a single page,
+  // loads file content if file-backed, and installs the PTE with proper permissions.
   }
   else if (r_scause() == 13 || r_scause() == 15)
   {

@@ -355,6 +355,8 @@ int kfork(void)
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   // project 3: 부모의 mmap_area를 자식에게 복사
+  // AI was used to copy parent's mmap_areas to the child during fork(),
+  // duplicating allocated physical pages while preserving lazy state.
   for (int i = 0; i < MAXMMAP; i++)
   {
     if (mmap_areas[i].p != p)

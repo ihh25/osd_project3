@@ -491,6 +491,8 @@ ismapped(pagetable_t pagetable, uint64 va)
 struct mmap_area mmap_areas[MAXMMAP];
 
 // project 3: mmap 구현
+// AI was used to implement mmap() including argument validation,
+// overlap check, MAP_POPULATE handling, and file-backed data loading.
 uint64
 mmap(uint64 addr, int length, int prot, int flags, int fd, int offset)
 {
@@ -603,6 +605,8 @@ mmap(uint64 addr, int length, int prot, int flags, int fd, int offset)
 }
 
 // project 3: munmap 구현
+// AI was used to implement munmap() with lazy mapping awareness
+// (skipping unallocated PTEs).
 int
 munmap(uint64 addr)
 {

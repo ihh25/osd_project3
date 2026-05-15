@@ -104,6 +104,7 @@ and the meminfo() system call has no error case, so it does not return -1.
 */
 
 // project 3: 현재 free 페이지 수 반환
+// AI was used to implement freemem() by traversing kmem.freelist under lock.
 int
 freemem(void)
 {

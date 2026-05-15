@@ -505,6 +505,7 @@ sys_pipe(void)
 }
 
 // sys_mmap: int mmap(uint64 addr, int length, int prot, int flags, int fd, int offset)
+// AI was used to implement the sys_mmap syscall wrapper.
 uint64
 sys_mmap(void)
 {
