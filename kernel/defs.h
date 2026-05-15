@@ -61,7 +61,8 @@ void            kfree(void *);
 void            kinit(void);
 // kalloc.c에 선언할 함수 1개 : meminfo()
 uint64          meminfo(void);
-
+//freemem 함수 선언
+int             freemem(void);
 
 // log.c
 void            initlog(int, struct superblock*);

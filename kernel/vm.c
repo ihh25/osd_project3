@@ -5,8 +5,10 @@
 #include "riscv.h"
 #include "defs.h"
 #include "spinlock.h"
-#include "proc.h"
+#include "sleeplock.h"
 #include "fs.h"
+#include "file.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -483,4 +485,167 @@ ismapped(pagetable_t pagetable, uint64 va)
     return 1;
   }
   return 0;
+}
+
+// project 3: mmap_area 전역 배열
+struct mmap_area mmap_areas[MAXMMAP];
+
+// project 3: mmap 구현
+uint64
+mmap(uint64 addr, int length, int prot, int flags, int fd, int offset)
+{
+  struct proc *p = myproc();
+  struct file *f = 0;
+
+  // addr은 page-aligned 이어야 함
+  if (addr % PGSIZE != 0)
+    return 0;
+
+  // length는 page size의 배수이어야 함
+  if (length <= 0 || length % PGSIZE != 0)
+    return 0;
+
+  // 파일 기반 매핑인 경우 (MAP_ANONYMOUS 아닌 경우)
+  if (!(flags & MAP_ANONYMOUS)) {
+    // fd가 유효한지 확인
+    if (fd < 0 || fd >= NOFILE || (f = p->ofile[fd]) == 0)
+      return 0;
+
+    // prot와 파일 권한 일치 확인
+    if (prot & PROT_READ && !f->readable)
+      return 0;
+    if (prot & PROT_WRITE && !f->writable)
+      return 0;
+  }
+
+  uint64 start = MMAPBASE + addr;
+  uint64 end = start + length;
+
+  // 기존 매핑과 겹치는지 확인
+  for (int i = 0; i < MAXMMAP; i++) {
+    if (mmap_areas[i].p == p && mmap_areas[i].addr != 0) {
+      uint64 exist_start = mmap_areas[i].addr;
+      uint64 exist_end = exist_start + mmap_areas[i].length;
+      if (start < exist_end && end > exist_start)
+        return 0;
+    }
+  }
+
+  // 빈 슬롯 찾기
+  int slot = -1;
+  for (int i = 0; i < MAXMMAP; i++) {
+    if (mmap_areas[i].p == 0) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot == -1)
+    return 0;
+
+  // mmap_area 정보 기록
+  mmap_areas[slot].f = f;
+  mmap_areas[slot].addr = start;
+  mmap_areas[slot].length = length;
+  mmap_areas[slot].offset = offset;
+  mmap_areas[slot].prot = prot;
+  mmap_areas[slot].flags = flags;
+  mmap_areas[slot].p = p;
+
+  // MAP_POPULATE인 경우 즉시 물리 페이지 할당
+  if (flags & MAP_POPULATE) {
+    for (uint64 va = start; va < end; va += PGSIZE) {
+      char *mem = kalloc();
+      if (mem == 0) {
+        // 할당 실패 시 지금까지 할당한 것 해제
+        for (uint64 va2 = start; va2 < va; va2 += PGSIZE) {
+          pte_t *pte = walk(p->pagetable, va2, 0);
+          if (pte && (*pte & PTE_V)) {
+            uint64 pa = PTE2PA(*pte);
+            kfree((void*)pa);
+            *pte = 0;
+          }
+        }
+        mmap_areas[slot].p = 0;
+        return 0;
+      }
+      memset(mem, 0, PGSIZE);
+
+      // 파일 기반 매핑이면 파일 데이터 읽기
+      if (!(flags & MAP_ANONYMOUS) && f != 0) {
+        int page_offset = (int)(va - start);
+        ilock(f->ip);
+        readi(f->ip, 0, (uint64)mem, offset + page_offset, PGSIZE);
+        iunlock(f->ip);
+      }
+
+      // 페이지 테이블 엔트리 생성
+      int perm = PTE_U;
+      if (prot & PROT_READ)  perm |= PTE_R;
+      if (prot & PROT_WRITE) perm |= PTE_W;
+
+      if (mappages(p->pagetable, va, PGSIZE, (uint64)mem, perm) != 0) {
+        kfree(mem);
+        for (uint64 va2 = start; va2 < va; va2 += PGSIZE) {
+          pte_t *pte = walk(p->pagetable, va2, 0);
+          if (pte && (*pte & PTE_V)) {
+            uint64 pa = PTE2PA(*pte);
+            kfree((void*)pa);
+            *pte = 0;
+          }
+        }
+        mmap_areas[slot].p = 0;
+        return 0;
+      }
+    }
+  }
+
+  return start;
+}
+
+// project 3: munmap 구현
+int
+munmap(uint64 addr)
+{
+  struct proc *p = myproc();
+
+  // addr이 page-aligned인지 확인
+  if (addr % PGSIZE != 0)
+    return -1;
+
+  // 해당 addr로 시작하는 mmap_area 찾기
+  int slot = -1;
+  for (int i = 0; i < MAXMMAP; i++) {
+    if (mmap_areas[i].p == p && mmap_areas[i].addr == addr) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot == -1)
+    return -1;
+
+  uint64 start = mmap_areas[slot].addr;
+  uint64 end = start + mmap_areas[slot].length;
+
+  // 각 페이지에 대해 처리
+  for (uint64 va = start; va < end; va += PGSIZE) {
+    pte_t *pte = walk(p->pagetable, va, 0);
+    if (pte && (*pte & PTE_V)) {
+      // 물리 페이지가 할당된 경우에만 해제
+      uint64 pa = PTE2PA(*pte);
+      kfree((void*)pa);
+      *pte = 0;
+    }
+    // 할당 안 된 페이지는 그냥 넘어감
+  }
+
+  // mmap_area 슬롯 초기화
+  mmap_areas[slot].f = 0;
+  mmap_areas[slot].addr = 0;
+  mmap_areas[slot].length = 0;
+  mmap_areas[slot].offset = 0;
+  mmap_areas[slot].prot = 0;
+  mmap_areas[slot].flags = 0;
+  mmap_areas[slot].p = 0;
+
+  return 1;
 }

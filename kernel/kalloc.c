@@ -102,3 +102,21 @@ meminfo(void)
 because the maximum value of type int is 2GB, therefore when the memory exceeds 2GB, an overflow occurs and the value becomes negative.
 and the meminfo() system call has no error case, so it does not return -1. 
 */
+
+// project 3: 현재 free 페이지 수 반환
+int
+freemem(void)
+{
+  struct run *r;
+  int count = 0;
+
+  acquire(&kmem.lock);
+  r = kmem.freelist;
+  while (r) {
+    count++;
+    r = r->next;
+  }
+  release(&kmem.lock);
+
+  return count;
+}

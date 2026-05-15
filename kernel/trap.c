@@ -3,6 +3,9 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 #include "proc.h"
 #include "defs.h"
 
@@ -16,15 +19,16 @@ void kernelvec();
 
 extern int devintr();
 
-void
-trapinit(void)
+// project 3: mmap_area 배열 참조
+extern struct mmap_area mmap_areas[MAXMMAP];
+
+void trapinit(void)
 {
   initlock(&tickslock, "time");
 }
 
 // set up to take exceptions and traps while in the kernel.
-void
-trapinithart(void)
+void trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
 }
@@ -39,22 +43,23 @@ usertrap(void)
 {
   int which_dev = 0;
 
-  if((r_sstatus() & SSTATUS_SPP) != 0)
+  if ((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
   // send interrupts and exceptions to kerneltrap(),
   // since we're now in the kernel.
-  w_stvec((uint64)kernelvec);  //DOC: kernelvec
+  w_stvec((uint64)kernelvec); // DOC: kernelvec
 
   struct proc *p = myproc();
-  
+
   // save user program counter.
   p->trapframe->epc = r_sepc();
-  
-  if(r_scause() == 8){
+
+  if (r_scause() == 8)
+  {
     // system call
 
-    if(killed(p))
+    if (killed(p))
       kexit(-1);
 
     // sepc points to the ecall instruction,
@@ -66,24 +71,99 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  // project 3: 페이지 폴트 핸들러
+  }
+  else if (r_scause() == 13 || r_scause() == 15)
+  {
+    // 13 = load page fault (read)
+    // 15 = store page fault (write)
+    uint64 fault_addr = r_stval();
+    int is_write = (r_scause() == 15);
+    int handled = 0;
+
+    // fault_addr이 속한 mmap_area 찾기
+    for (int i = 0; i < MAXMMAP; i++)
+    {
+      struct mmap_area *ma = &mmap_areas[i];
+      if (ma->p != p)
+        continue;
+      if (fault_addr < ma->addr || fault_addr >= ma->addr + ma->length)
+        continue;
+
+      // 쓰기 접근인데 쓰기 권한 없으면 실패
+      if (is_write && !(ma->prot & PROT_WRITE))
+      {
+        break;
+      }
+
+      // 페이지 경계로 정렬
+      uint64 va = PGROUNDDOWN(fault_addr);
+
+      // 물리 페이지 할당
+      char *mem = kalloc();
+      if (mem == 0)
+        break;
+      memset(mem, 0, PGSIZE);
+
+      // 파일 기반 매핑이면 파일 데이터 읽기
+      if (!(ma->flags & MAP_ANONYMOUS) && ma->f != 0)
+      {
+        int page_offset = (int)(va - ma->addr);
+        ilock(ma->f->ip);
+        readi(ma->f->ip, 0, (uint64)mem, ma->offset + page_offset, PGSIZE);
+        iunlock(ma->f->ip);
+      }
+
+      // 페이지 테이블 엔트리 생성
+      int perm = PTE_U;
+      if (ma->prot & PROT_READ)
+        perm |= PTE_R;
+      if (ma->prot & PROT_WRITE)
+        perm |= PTE_W;
+
+      if (mappages(p->pagetable, va, PGSIZE, (uint64)mem, perm) != 0)
+      {
+        kfree(mem);
+        break;
+      }
+
+      handled = 1;
+      break;
+    }
+
+    // 처리 못 했으면 프로세스 종료
+    if (!handled)
+    {
+      printf("usertrap(): page fault not handled, pid=%d\n", p->pid);
+      p->killed = 1;
+    }
+  }
+  else if ((which_dev = devintr()) != 0)
+  {
     // ok
-  } else if((r_scause() == 15 || r_scause() == 13) &&
-            vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
+  }
+  else if ((r_scause() == 15 || r_scause() == 13) &&
+           vmfault(p->pagetable, r_stval(), (r_scause() == 13) ? 1 : 0) != 0)
+  {
     // page fault on lazily-allocated page
-  } else {
+  }
+  else
+  {
     printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
     setkilled(p);
   }
 
-  if(killed(p))
+  if (killed(p))
     kexit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2){
-    if(p != 0 && p->state == RUNNING){
-      if(p->timeslice <= 0){
+  if (which_dev == 2)
+  {
+    if (p != 0 && p->state == RUNNING)
+    {
+      if (p->timeslice <= 0)
+      {
         p->timeslice = 5;    // 타임슬라이스 재설정
         update_vdeadline(p); // EEVDF 마감 기한 갱신
         yield();             // CPU 양보
@@ -103,8 +183,7 @@ usertrap(void)
 //
 // set up trapframe and control registers for a return to user space
 //
-void
-prepare_return(void)
+void prepare_return(void)
 {
   struct proc *p = myproc();
 
@@ -122,11 +201,11 @@ prepare_return(void)
   p->trapframe->kernel_satp = r_satp();         // kernel page table
   p->trapframe->kernel_sp = p->kstack + PGSIZE; // process's kernel stack
   p->trapframe->kernel_trap = (uint64)usertrap;
-  p->trapframe->kernel_hartid = r_tp();         // hartid for cpuid()
+  p->trapframe->kernel_hartid = r_tp(); // hartid for cpuid()
 
   // set up the registers that trampoline.S's sret will use
   // to get to user space.
-  
+
   // set S Previous Privilege mode to User.
   unsigned long x = r_sstatus();
   x &= ~SSTATUS_SPP; // clear SPP to 0 for user mode
@@ -139,8 +218,7 @@ prepare_return(void)
 
 // interrupts and exceptions from kernel code go here via kernelvec,
 // on whatever the current kernel stack is.
-void 
-kerneltrap()
+void kerneltrap()
 {
   int which_dev = 0;
   uint64 sepc = r_sepc();
@@ -148,22 +226,26 @@ kerneltrap()
   uint64 scause = r_scause();
 
   struct proc *p = myproc(); // 여기다도 myproc 추가
-  
-  if((sstatus & SSTATUS_SPP) == 0)
+
+  if ((sstatus & SSTATUS_SPP) == 0)
     panic("kerneltrap: not from supervisor mode");
-  if(intr_get() != 0)
+  if (intr_get() != 0)
     panic("kerneltrap: interrupts enabled");
 
-  if((which_dev = devintr()) == 0){
+  if ((which_dev = devintr()) == 0)
+  {
     // interrupt or trap from an unknown source
     printf("scause=0x%lx sepc=0x%lx stval=0x%lx\n", scause, r_sepc(), r_stval());
     panic("kerneltrap");
   }
 
   // give up the CPU if this is a timer interrupt. -> if the process has used all its timeslice
-  if(which_dev == 2){
-    if(p != 0 && p->state == RUNNING){
-      if(p->timeslice <= 0){
+  if (which_dev == 2)
+  {
+    if (p != 0 && p->state == RUNNING)
+    {
+      if (p->timeslice <= 0)
+      {
         p->timeslice = 5;    // 타임슬라이스 재설정
         update_vdeadline(p); // EEVDF 마감 기한 갱신
         yield();             // CPU 양보
@@ -193,7 +275,7 @@ kerneltrap()
 //     p->timeslice -= 1 ;
 //     if(p->timeslice <= 0) {
 //         update_vdeadline(p);
-//         p->timeslice = 5; 
+//         p->timeslice = 5;
 //     }
 
 //     p->last_update_time = r_time() ;
@@ -207,70 +289,76 @@ kerneltrap()
 //   // of a second.
 //   w_stimecmp(r_time() + 100000);
 // }
-void
-clockintr()
+void clockintr()
 {
-  if(cpuid() == 0){
+  if (cpuid() == 0)
+  {
     acquire(&tickslock);
     ticks++;
     wakeup(&ticks);
     release(&tickslock);
   }
   struct proc *p = myproc();
-  if(p != 0 && p->state == RUNNING){
+  if (p != 0 && p->state == RUNNING)
+  {
     acquire(&p->lock);
 
-
-    p->runtime++;                          // 실제 실행 틱 증가
-    update_vruntime(p);                    // vruntime 업데이트
-    p->last_update_time = r_time();        // 업데이트 시점 갱신
-    p->timeslice--;                        // 남은 타임슬라이스 감소
+    p->runtime++;                   // 실제 실행 틱 증가
+    update_vruntime(p);             // vruntime 업데이트
+    p->last_update_time = r_time(); // 업데이트 시점 갱신
+    p->timeslice--;                 // 남은 타임슬라이스 감소
 
     release(&p->lock);
-
   }
 
   w_stimecmp(r_time() + 100000);
 }
-
 
 // check if it's an external interrupt or software interrupt,
 // and handle it.
 // returns 2 if timer interrupt,
 // 1 if other device,
 // 0 if not recognized.
-int
-devintr()
+int devintr()
 {
   uint64 scause = r_scause();
 
-  if(scause == 0x8000000000000009L){
+  if (scause == 0x8000000000000009L)
+  {
     // this is a supervisor external interrupt, via PLIC.
 
     // irq indicates which device interrupted.
     int irq = plic_claim();
 
-    if(irq == UART0_IRQ){
+    if (irq == UART0_IRQ)
+    {
       uartintr();
-    } else if(irq == VIRTIO0_IRQ){
+    }
+    else if (irq == VIRTIO0_IRQ)
+    {
       virtio_disk_intr();
-    } else if(irq){
+    }
+    else if (irq)
+    {
       printf("unexpected interrupt irq=%d\n", irq);
     }
 
     // the PLIC allows each device to raise at most one
     // interrupt at a time; tell the PLIC the device is
     // now allowed to interrupt again.
-    if(irq)
+    if (irq)
       plic_complete(irq);
 
     return 1;
-  } else if(scause == 0x8000000000000005L){
+  }
+  else if (scause == 0x8000000000000005L)
+  {
     // timer interrupt.
     clockintr();
     return 2;
-  } else {
+  }
+  else
+  {
     return 0;
   }
 }
-

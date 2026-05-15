@@ -17,13 +17,10 @@
 // protection flags
 #define PROT_READ 0x1
 #define PROT_WRITE 0x2
-
 // mapping flags
 #define MAP_ANONYMOUS 0x1
 #define MAP_POPULATE 0x2
-
 // mmap base
 #define MMAPBASE 0x40000000L
-
 // maximum number of mappings
 #define MAXMMAP 64
