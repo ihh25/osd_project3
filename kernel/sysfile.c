@@ -505,7 +505,6 @@ sys_pipe(void)
 }
 
 // sys_mmap: int mmap(uint64 addr, int length, int prot, int flags, int fd, int offset)
-// AI was used to implement the sys_mmap syscall wrapper.
 uint64
 sys_mmap(void)
 {
@@ -534,5 +533,10 @@ sys_munmap(void)
   argaddr(0, &addr);
   return munmap(addr);
 }
+// Using AI (Gemini)
+// Question: Where should I declare these sys_ functions? Is it okay to declare them in sysproc.c?
+// Answer: Since mmap and munmap are related to file reading and writing, it is appropriate to declare them in sysfile.c.
+// However, freemem is not related to files and is a function that queries the resource known as the physical memory status of the entire system, 
+// so sysproc.c is appropriate.
 
 

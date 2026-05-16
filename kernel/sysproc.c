@@ -156,7 +156,6 @@ sys_waitpid(void)
 }
 
 // sys_freemem : int freemem(void)
-// AI was used to implement the sys_freemem syscall wrapper.
 uint64
 sys_freemem(void)
 {

@@ -124,3 +124,7 @@ struct mmap_area {
     int flags;
     struct proc *p;
 };
+// Using AI (Gemini)
+// Question: Where should I define struct mmap_area? Is it okay to do it in vm.c?
+// Answer: Since it is a status value regarding which memory area a specific process has reserved, 
+// it is more appropriate to define it in proc.h, which is related to the process.
